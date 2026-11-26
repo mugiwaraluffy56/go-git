@@ -206,7 +206,7 @@ This is an educational implementation. Notable limitations:
 - No packfile support (loose objects only)
 - No remote operations (push, pull, fetch, clone)
 - No merge/rebase functionality
-- Simplified tree handling (flat structure)
+- Simplified checkout (files absent from the target remain in the working tree)
 - No submodule support
 - No hooks
 

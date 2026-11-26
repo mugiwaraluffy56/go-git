@@ -51,13 +51,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		obj, err := object.ReadObject(repoRoot, headCommitHash)
 		if err == nil {
 			if commit, ok := obj.(*object.Commit); ok {
-				treeObj, err := object.ReadObject(repoRoot, commit.TreeHash)
-				if err == nil {
-					if tree, ok := treeObj.(*object.Tree); ok {
-						for _, entry := range tree.Entries {
-							headTree[entry.Name] = entry.Hash
-						}
-					}
+				files, err := collectTreeFiles(repoRoot, commit.TreeHash, "")
+				if err != nil {
+					return err
+				}
+				for _, entry := range files {
+					headTree[entry.Name] = entry.Hash
 				}
 			}
 		}

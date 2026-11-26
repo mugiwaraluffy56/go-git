@@ -7,13 +7,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yourusername/gogit/internal/index"
+	"github.com/yourusername/gogit/internal/object"
 	"github.com/yourusername/gogit/internal/repository"
 )
 
-func TestCheckoutCanSwitchBackAfterSkippingSubtree(t *testing.T) {
+func TestCheckoutRestoresNestedFilesAndIndex(t *testing.T) {
 	root := enterCheckoutRepo(t)
-	checkoutOK(t, os.Mkdir("docs", 0755))
-	writeCheckoutFile(t, "docs/readme", "nested")
+	nested := filepath.Join("docs", "guide", "readme")
+	checkoutOK(t, os.MkdirAll(filepath.Dir(nested), 0755))
+	writeCheckoutFile(t, nested, "nested")
+	writeCheckoutFile(t, filepath.Join("docs", "keep"), "keep")
 	writeCheckoutFile(t, "tracked", "base")
 	checkoutOK(t, runAdd(nil, []string{"docs", "tracked"}))
 	commitMessage = "base"
@@ -23,10 +27,90 @@ func TestCheckoutCanSwitchBackAfterSkippingSubtree(t *testing.T) {
 	base, err := refs.ResolveHead()
 	checkoutOK(t, err)
 	checkoutOK(t, refs.CreateBranch("target", base))
+
+	// Reproduce an index left behind by the old checkout implementation.
+	idx, err := index.ReadIndex(root)
+	checkoutOK(t, err)
+	idx.RemoveEntry(nested)
+	idx.RemoveEntry(filepath.Join("docs", "keep"))
+	checkoutOK(t, idx.Write(root))
+	checkoutOK(t, os.Remove(nested))
+	checkoutOK(t, os.Remove(filepath.Dir(nested)))
+
 	checkoutOK(t, runCheckout(nil, []string{"target"}))
-	checkoutOK(t, runCheckout(nil, []string{"main"}))
-	if got := readCheckoutFile(t, "docs/readme"); got != "nested" {
+	if got := readCheckoutFile(t, nested); got != "nested" {
 		t.Fatalf("nested file = %q, want nested", got)
+	}
+	checkoutOK(t, runCheckout(nil, []string{"main"}))
+
+	writeCheckoutFile(t, "tracked", "updated")
+	checkoutOK(t, runAdd(nil, []string{"tracked"}))
+	commitMessage = "follow-up"
+	checkoutOK(t, runCommit(nil, nil))
+	head, err := refs.ResolveHead()
+	checkoutOK(t, err)
+	obj, err := object.ReadObject(root, head)
+	checkoutOK(t, err)
+	files, err := collectTreeFiles(root, obj.(*object.Commit).TreeHash, "")
+	checkoutOK(t, err)
+	for _, file := range files {
+		if file.Name == nested {
+			return
+		}
+	}
+	t.Fatalf("follow-up commit omitted %s", nested)
+}
+
+func TestCheckoutRefusesNestedCollisions(t *testing.T) {
+	for _, parentCollision := range []bool{false, true} {
+		name := "file"
+		if parentCollision {
+			name = "parent"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := enterCheckoutRepo(t)
+			writeCheckoutFile(t, "a", "base")
+			checkoutOK(t, runAdd(nil, []string{"a"}))
+			commitMessage = "base"
+			checkoutOK(t, runCommit(nil, nil))
+
+			refs := repository.NewRefs(root)
+			base, err := refs.ResolveHead()
+			checkoutOK(t, err)
+			checkoutOK(t, refs.CreateBranch("target", base))
+			checkoutOK(t, refs.SetHead("target", true))
+			checkoutOK(t, os.Mkdir("docs", 0755))
+			nested := filepath.Join("docs", "readme")
+			writeCheckoutFile(t, nested, "target")
+			writeCheckoutFile(t, "a", "target")
+			checkoutOK(t, runAdd(nil, []string{"a", "docs"}))
+			commitMessage = "target"
+			checkoutOK(t, runCommit(nil, nil))
+			checkoutOK(t, runCheckout(nil, []string{"main"}))
+
+			collision := nested
+			if parentCollision {
+				checkoutOK(t, os.Remove(nested))
+				checkoutOK(t, os.Remove("docs"))
+				collision = "docs"
+			}
+			writeCheckoutFile(t, collision, "local")
+			err = runCheckout(nil, []string{"target"})
+			if err == nil || !strings.Contains(err.Error(), "cannot switch") {
+				t.Fatalf("checkout error = %v, want collision refusal", err)
+			}
+			if got := readCheckoutFile(t, collision); got != "local" {
+				t.Errorf("collision contents = %q, want local", got)
+			}
+			if got := readCheckoutFile(t, "a"); got != "base" {
+				t.Errorf("earlier path changed to %q", got)
+			}
+			branch, err := refs.CurrentBranch()
+			checkoutOK(t, err)
+			if branch != "main" {
+				t.Errorf("HEAD moved to %q", branch)
+			}
+		})
 	}
 }
 
