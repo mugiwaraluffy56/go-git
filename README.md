@@ -72,6 +72,8 @@ echo "More content" >> hello.txt
 gogit diff
 ```
 
+Checkout refuses to switch to an existing branch or commit when there are staged changes, unstaged changes to tracked files, or when a file would overwrite an untracked path. Commit or set aside the reported changes before switching.
+
 ## Project Structure
 
 ```
