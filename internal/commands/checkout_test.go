@@ -3,11 +3,66 @@ package commands
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/yourusername/gogit/internal/repository"
 )
+
+func TestCheckoutCanSwitchBackAfterSkippingSubtree(t *testing.T) {
+	root := enterCheckoutRepo(t)
+	checkoutOK(t, os.Mkdir("docs", 0755))
+	writeCheckoutFile(t, "docs/readme", "nested")
+	writeCheckoutFile(t, "tracked", "base")
+	checkoutOK(t, runAdd(nil, []string{"docs", "tracked"}))
+	commitMessage = "base"
+	checkoutOK(t, runCommit(nil, nil))
+
+	refs := repository.NewRefs(root)
+	base, err := refs.ResolveHead()
+	checkoutOK(t, err)
+	checkoutOK(t, refs.CreateBranch("target", base))
+	checkoutOK(t, runCheckout(nil, []string{"target"}))
+	checkoutOK(t, runCheckout(nil, []string{"main"}))
+	if got := readCheckoutFile(t, "docs/readme"); got != "nested" {
+		t.Fatalf("nested file = %q, want nested", got)
+	}
+}
+
+func TestCheckoutCanSwitchBackAfterExecutableModeChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not support Unix executable bits")
+	}
+	root := enterCheckoutRepo(t)
+	writeCheckoutFile(t, "script", "script")
+	checkoutOK(t, runAdd(nil, []string{"script"}))
+	commitMessage = "base"
+	checkoutOK(t, runCommit(nil, nil))
+
+	refs := repository.NewRefs(root)
+	base, err := refs.ResolveHead()
+	checkoutOK(t, err)
+	checkoutOK(t, refs.CreateBranch("target", base))
+	checkoutOK(t, refs.SetHead("target", true))
+	checkoutOK(t, os.Chmod("script", 0755))
+	checkoutOK(t, runAdd(nil, []string{"script"}))
+	commitMessage = "make executable"
+	checkoutOK(t, runCommit(nil, nil))
+
+	checkoutOK(t, runCheckout(nil, []string{"main"}))
+	info, err := os.Stat("script")
+	checkoutOK(t, err)
+	if info.Mode()&0111 != 0 {
+		t.Fatal("script is executable on main")
+	}
+	checkoutOK(t, runCheckout(nil, []string{"target"}))
+	info, err = os.Stat("script")
+	checkoutOK(t, err)
+	if info.Mode()&0111 == 0 {
+		t.Fatal("script is not executable on target")
+	}
+}
 
 func TestCheckoutProtectsLocalChanges(t *testing.T) {
 	tests := []struct {
@@ -25,24 +80,9 @@ func TestCheckoutProtectsLocalChanges(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-			cwd, err := os.Getwd()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chdir(root); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := os.Chdir(cwd); err != nil {
-					t.Error(err)
-				}
-			})
-			checkoutOK(t, runInit(nil, nil))
+			root := enterCheckoutRepo(t)
 			writeCheckoutFile(t, "tracked", "base")
 			checkoutOK(t, runAdd(nil, []string{"tracked"}))
-			previousMessage := commitMessage
-			t.Cleanup(func() { commitMessage = previousMessage })
 			commitMessage = "base"
 			checkoutOK(t, runCommit(nil, nil))
 
@@ -107,6 +147,23 @@ func TestCheckoutProtectsLocalChanges(t *testing.T) {
 			}
 		})
 	}
+}
+
+func enterCheckoutRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	cwd, err := os.Getwd()
+	checkoutOK(t, err)
+	checkoutOK(t, os.Chdir(root))
+	previousMessage := commitMessage
+	t.Cleanup(func() {
+		commitMessage = previousMessage
+		if err := os.Chdir(cwd); err != nil {
+			t.Error(err)
+		}
+	})
+	checkoutOK(t, runInit(nil, nil))
+	return root
 }
 
 func checkoutOK(t *testing.T, err error) {

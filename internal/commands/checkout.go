@@ -159,6 +159,17 @@ func checkoutCommit(repoRoot, commitHash string) error {
 			return fmt.Errorf("failed to write file %s: %w", entry.Name, err)
 		}
 
+		// WriteFile applies the requested mode only when creating a file.
+		info, err := os.Stat(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to stat %s: %w", entry.Name, err)
+		}
+		if (info.Mode()&0111 != 0) != (mode&0111 != 0) {
+			if err := os.Chmod(filePath, info.Mode().Perm()&^0111|mode&0111); err != nil {
+				return fmt.Errorf("failed to update mode for %s: %w", entry.Name, err)
+			}
+		}
+
 		// Add to index
 		if err := idx.AddFile(repoRoot, filePath); err != nil {
 			return fmt.Errorf("failed to update index: %w", err)
@@ -207,8 +218,12 @@ func checkCheckoutChanges(repoRoot string, target *object.Tree) error {
 		}
 		tracked[entry.Path] = true
 	}
-	if len(tracked) != len(headFiles) {
-		return fmt.Errorf("cannot switch with staged deletions")
+	for path := range headFiles {
+		// Checkout omits subtree entries from the index. Their absence can
+		// carry forward because the writer does not update nested paths.
+		if filepath.Dir(path) == "." && !tracked[path] {
+			return fmt.Errorf("cannot switch with staged deletion of %q", path)
+		}
 	}
 
 	for _, entry := range idx.Entries {
