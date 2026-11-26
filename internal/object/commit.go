@@ -153,7 +153,7 @@ func (c *Commit) PrettyPrint() string {
 	_, offset := c.AuthorTime.Zone()
 	tzOffset := fmt.Sprintf("%+03d%02d", offset/3600, (offset%3600)/60)
 	sb.WriteString(fmt.Sprintf("author %s %d %s\n", c.Author, authorTime, tzOffset))
-	sb.WriteString(fmt.Sprintf("committer %s %d %s\n", c.CommitTime.Unix(), c.Committer, tzOffset))
+	sb.WriteString(fmt.Sprintf("committer %s %d %s\n", c.Committer, c.CommitTime.Unix(), tzOffset))
 	sb.WriteString("\n")
 	sb.WriteString(c.Message)
 	sb.WriteString("\n")
