@@ -109,25 +109,18 @@ func checkoutCommit(repoRoot, commitHash string) error {
 		return fmt.Errorf("object is not a commit")
 	}
 
-	// Read tree
-	treeObj, err := object.ReadObject(repoRoot, commit.TreeHash)
+	files, err := collectTreeFiles(repoRoot, commit.TreeHash, "")
 	if err != nil {
-		return fmt.Errorf("failed to read tree: %w", err)
+		return err
 	}
-
-	tree, ok := treeObj.(*object.Tree)
-	if !ok {
-		return fmt.Errorf("object is not a tree")
-	}
-
-	if err := checkCheckoutChanges(repoRoot, tree); err != nil {
+	if err := checkCheckoutChanges(repoRoot, files); err != nil {
 		return err
 	}
 
 	// Update working directory and index
 	idx := index.NewIndex()
 
-	for _, entry := range tree.Entries {
+	for _, entry := range files {
 		// Read blob
 		blobObj, err := object.ReadObject(repoRoot, entry.Hash)
 		if err != nil {
@@ -136,8 +129,7 @@ func checkoutCommit(repoRoot, commitHash string) error {
 
 		blob, ok := blobObj.(*object.Blob)
 		if !ok {
-			// Might be a subtree - skip for now (simplified implementation)
-			continue
+			return fmt.Errorf("object for %q is not a blob", entry.Name)
 		}
 
 		// Write file
@@ -185,7 +177,7 @@ func checkoutCommit(repoRoot, commitHash string) error {
 }
 
 // checkCheckoutChanges checks the entire index because checkout replaces it.
-func checkCheckoutChanges(repoRoot string, target *object.Tree) error {
+func checkCheckoutChanges(repoRoot string, target []object.TreeEntry) error {
 	idx, err := index.ReadIndex(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to read index: %w", err)
@@ -205,8 +197,12 @@ func checkCheckoutChanges(repoRoot string, target *object.Tree) error {
 		if !ok {
 			return fmt.Errorf("HEAD does not point to a commit")
 		}
-		if err := collectCheckoutTreeFiles(repoRoot, commit.TreeHash, "", headFiles); err != nil {
+		files, err := collectTreeFiles(repoRoot, commit.TreeHash, "")
+		if err != nil {
 			return err
+		}
+		for _, file := range files {
+			headFiles[file.Name] = file
 		}
 	}
 
@@ -219,8 +215,8 @@ func checkCheckoutChanges(repoRoot string, target *object.Tree) error {
 		tracked[entry.Path] = true
 	}
 	for path := range headFiles {
-		// Checkout omits subtree entries from the index. Their absence can
-		// carry forward because the writer does not update nested paths.
+		// Older checkouts omitted nested paths from the index. Check their
+		// working-tree contents separately if this checkout would write them.
 		if filepath.Dir(path) == "." && !tracked[path] {
 			return fmt.Errorf("cannot switch with staged deletion of %q", path)
 		}
@@ -247,41 +243,85 @@ func checkCheckoutChanges(repoRoot string, target *object.Tree) error {
 		}
 	}
 
-	for _, entry := range target.Entries {
-		// The checkout writer currently materializes only root-level blobs.
-		if entry.Mode == "40000" || entry.Mode == "040000" || tracked[entry.Name] {
+	for _, entry := range target {
+		if err := checkCheckoutParents(repoRoot, entry.Name); err != nil {
+			return err
+		}
+		if tracked[entry.Name] {
 			continue
 		}
-		_, err := os.Lstat(filepath.Join(repoRoot, entry.Name))
-		if err == nil {
-			return fmt.Errorf("cannot switch: untracked path %q would be overwritten", entry.Name)
+		path := filepath.Join(repoRoot, entry.Name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
 		}
-		if !os.IsNotExist(err) {
+		if err != nil {
 			return fmt.Errorf("failed to inspect %q: %w", entry.Name, err)
 		}
+
+		// Recover clean nested files left unindexed by older checkouts.
+		if head, exists := headFiles[entry.Name]; exists && info.Mode().IsRegular() &&
+			(info.Mode()&0111 != 0) == (head.Mode == "100755") {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("failed to read %q: %w", entry.Name, err)
+			}
+			if utils.HashObject("blob", content) == head.Hash {
+				continue
+			}
+		}
+		return fmt.Errorf("cannot switch: untracked path %q would be overwritten", entry.Name)
 	}
 	return nil
 }
 
-func collectCheckoutTreeFiles(repoRoot, hash, dir string, files map[string]object.TreeEntry) error {
+func checkCheckoutParents(repoRoot, path string) error {
+	dir := filepath.Dir(path)
+	if dir == "." {
+		return nil
+	}
+	if err := checkCheckoutParents(repoRoot, dir); err != nil {
+		return err
+	}
+	info, err := os.Lstat(filepath.Join(repoRoot, dir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("cannot switch: path %q blocks directory for %q", dir, path)
+	}
+	return nil
+}
+
+// collectTreeFiles returns leaf entries with paths relative to the repository root.
+func collectTreeFiles(repoRoot, hash, dir string) ([]object.TreeEntry, error) {
 	obj, err := object.ReadObject(repoRoot, hash)
 	if err != nil {
-		return fmt.Errorf("failed to read HEAD tree: %w", err)
+		return nil, fmt.Errorf("failed to read tree %s: %w", hash, err)
 	}
 	tree, ok := obj.(*object.Tree)
 	if !ok {
-		return fmt.Errorf("HEAD tree %s does not point to a tree object", hash)
+		return nil, fmt.Errorf("object %s is not a tree", hash)
 	}
 
+	var files []object.TreeEntry
 	for _, entry := range tree.Entries {
-		path := filepath.Join(dir, entry.Name)
+		if !filepath.IsLocal(entry.Name) || filepath.Base(entry.Name) != entry.Name || entry.Name == "." || entry.Name == ".gogit" {
+			return nil, fmt.Errorf("invalid tree entry name %q", entry.Name)
+		}
+		entry.Name = filepath.Join(dir, entry.Name)
 		if entry.Mode == "40000" || entry.Mode == "040000" {
-			if err := collectCheckoutTreeFiles(repoRoot, entry.Hash, path, files); err != nil {
-				return err
+			children, err := collectTreeFiles(repoRoot, entry.Hash, entry.Name)
+			if err != nil {
+				return nil, err
 			}
+			files = append(files, children...)
 		} else {
-			files[path] = entry
+			files = append(files, entry)
 		}
 	}
-	return nil
+	return files, nil
 }
